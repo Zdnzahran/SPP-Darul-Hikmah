@@ -1,0 +1,16 @@
+# Mengabaikan folder modul pihak ketiga (ukurannya sangat besar)
+node_modules/
+
+# Mengabaikan file rahasia konfigurasi database dan session key
+.env
+
+# Mengabaikan file catatan log sistem
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Mengabaikan folder konfigurasi editor lokal (jika ada)
+.vscode/
+.idea/
+.DS_Store
