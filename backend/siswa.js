@@ -4,7 +4,7 @@ const { kunciBendahara } = require('./auth');
 
 const router = express.Router();
 
-// 1. DAFTARKAN SISWA BARU + TRANSAKSI TAGIHAN AWAL (POST /api/siswa)
+// DAFTARKAN SISWA BARU + 3 JENIS TAGIHAN AWAL (POST /api/siswa)
 router.post('/', kunciBendahara, async (req, res) => {
   // Memulai sesi transaksi database
   const koneksiTransaksi = await db.getConnection();
@@ -12,13 +12,13 @@ router.post('/', kunciBendahara, async (req, res) => {
 
   try {
     const nama = req.body.nama ? req.body.nama.trim() : '';
-    const { kelas_id, spp_bulanan_id, spp_pengembangan_id, bulan_mulai_tagih, saldo_awal } = req.body;
+    const { kelas_id, spp_bulanan_id, spp_pengembangan_id, spp_tahunan_id, bulan_mulai_tagih, saldo_awal } = req.body;
 
-    // 1. Validasi Input Wajib
-    if (!nama || !kelas_id || !spp_bulanan_id || !spp_pengembangan_id || !bulan_mulai_tagih) {
+    // 1. Validasi Input Wajib (Kunci untuk 3 jenis SPP wajib)
+    if (!nama || !kelas_id || !spp_bulanan_id || !spp_pengembangan_id || !spp_tahunan_id || !bulan_mulai_tagih) {
       await koneksiTransaksi.rollback();
       return res.status(400).json({
-        error: { kode: "VALIDASI_GAGAL", pesan: "Semua kolom data siswa wajib diisi." }
+        error: { kode: "VALIDASI_GAGAL", pesan: "Semua kolom data siswa termasuk 3 jenis SPP wajib diisi." }
       });
     }
 
@@ -33,82 +33,82 @@ router.post('/', kunciBendahara, async (req, res) => {
 
     let adaPeringatan = false;
     if (cekKembar.length > 0) {
-      adaPeringatan = true; // Ditandai untuk memicu field peringatan di respons akhir
+      adaPeringatan = true;
     }
 
-    // 3. Ambil Nilai Biaya SPP untuk Dibekukan ke Tabel Tagihan
-    const [dataSppBulanan] = await koneksiTransaksi.query('SELECT biaya FROM spp WHERE id = ? AND jenis = "bulanan"', [spp_bulanan_id]);
-    const [dataSppPengembangan] = await koneksiTransaksi.query('SELECT biaya FROM spp WHERE id = ? AND jenis = "pengembangan"', [spp_pengembangan_id]);
+    // 3. Ambil Nilai Biaya SPP dari DB untuk Dibekukan ke Tabel Tagihan
+    const [resBln] = await koneksiTransaksi.query('SELECT biaya FROM spp WHERE id = ? AND jenis = "bulanan" AND dihapus_pada IS NULL', [spp_bulanan_id]);
+    const [resPgb] = await koneksiTransaksi.query('SELECT biaya FROM spp WHERE id = ? AND jenis = "pengembangan" AND dihapus_pada IS NULL', [spp_pengembangan_id]);
+    const [resThn] = await koneksiTransaksi.query('SELECT biaya FROM spp WHERE id = ? AND jenis = "tahunan" AND dihapus_pada IS NULL', [spp_tahunan_id]);
 
-    if (dataSppBulanan.length === 0 || dataSppPengembangan.length === 0) {
+    // Validasi jika ada ID master SPP yang salah ketik atau tidak ditemukan
+    if (resBln.length === 0 || resPgb.length === 0 || resThn.length === 0) {
       await koneksiTransaksi.rollback();
       return res.status(404).json({
-        error: { kode: "TIDAK_DITEMUKAN", pesan: "Golongan SPP yang dipilih tidak valid atau sudah dihapus." }
+        error: { kode: "TIDAK_DITEMUKAN", pesan: "Salah satu golongan ID SPP yang Anda masukkan tidak valid di database." }
       });
     }
 
-    const biayaBulanan = dataSppBulanan[0].biaya;
-    const biayaPengembangan = dataSppPengembangan[0].biaya;
+    const biayaBulanan = resBln[0].biaya;
+    const biayaPengembangan = resPgb[0].biaya;
+    const biayaTahunan = resThn[0].biaya;
 
-    // 4. INSERT DATA SISWA
+    // 4. INSERT DATA SISWA BARU KEDALAM TABEL MYSQL
     const [resultSiswa] = await koneksiTransaksi.query(
-      `INSERT INTO siswa (nama, kelas_id, spp_bulanan_id, spp_pengembangan_id, bulan_mulai_tagih) 
-       VALUES (?, ?, ?, ?, ?)`,
-      [nama, kelas_id, spp_bulanan_id, spp_pengembangan_id, tanggalMulai]
+      `INSERT INTO siswa (nama, kelas_id, spp_bulanan_id, spp_pengembangan_id, spp_tahunan_id, bulan_mulai_tagih) 
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [nama, kelas_id, spp_bulanan_id, spp_pengembangan_id, spp_tahunan_id, tanggalMulai]
     );
     const idSiswaBaru = resultSiswa.insertId;
 
-    // 5. ATURAN BISNIS: Otomatis Buat Tagihan Pengembangan Penuh (Sekali seumur hidup)
-    const [resultTagihanPengembangan] = await koneksiTransaksi.query(
-      `INSERT INTO tagihan (siswa_id, jenis, bulan, nominal, spp_id) 
-       VALUES (?, 'pengembangan', NULL, ?, ?)`,
+    // 5. OTOMATIS GENERATE LEMBAR TAGIHAN PENGEMBANGAN (Tunggal & Penuh, bulan = NULL)
+    await koneksiTransaksi.query(
+      `INSERT INTO tagihan (siswa_id, jenis, bulan, nominal, spp_id) VALUES (?, 'pengembangan', NULL, ?, ?)`,
       [idSiswaBaru, biayaPengembangan, spp_pengembangan_id]
     );
-    const idTagihanPengembangan = resultTagihanPengembangan.insertId;
 
-    // 6. ATURAN BISNIS: Otomatis Buat Tagihan Bulanan Pertama (Sesuai bulan_mulai_tagih)
-    const [resultTagihanBulanan] = await koneksiTransaksi.query(
-      `INSERT INTO tagihan (siswa_id, jenis, bulan, nominal, spp_id) 
-       VALUES (?, 'bulanan', ?, ?, ?)`,
+    // 6. OTOMATIS GENERATE LEMBAR TAGIHAN BULANAN PERDANA
+    await koneksiTransaksi.query(
+      `INSERT INTO tagihan (siswa_id, jenis, bulan, nominal, spp_id) VALUES (?, 'bulanan', ?, ?, ?)`,
       [idSiswaBaru, tanggalMulai, biayaBulanan, spp_bulanan_id]
     );
-    const idTagihanBulanan = resultTagihanBulanan.insertId;
 
-    // 7. ATURAN BISNIS: Impor Saldo Awal Siswa Lama (Jika diisi oleh bendahara)
+    // 7. OTOMATIS GENERATE LEMBAR TAGIHAN TAHUNAN KURIKULUM PERDANA
+    await koneksiTransaksi.query(
+      `INSERT INTO tagihan (siswa_id, jenis, bulan, nominal, spp_id) VALUES (?, 'tahunan', ?, ?, ?)`,
+      [idSiswaBaru, tanggalMulai, biayaTahunan, spp_tahunan_id]
+    );
+
+    // 8. ATURAN BISNIS: Manajemen Pencatatan Saldo Awal Siswa Lama
     if (saldo_awal) {
       const bulananSudahDibayar = parseInt(saldo_awal.bulanan_sudah_dibayar) || 0;
       const pengembanganSudahDibayar = parseInt(saldo_awal.pengembangan_sudah_dibayar) || 0;
-      const hariIni = new Date().toISOString().slice(0, 10); // Format YYYY-MM-DD
+      const tahunanSudahDibayar = parseInt(saldo_awal.tahunan_sudah_dibayar) || 0;
+      const hariIni = new Date().toISOString().slice(0, 10);
 
-      // Jika ada cicilan pengembangan terdahulu
       if (pengembanganSudahDibayar > 0) {
-        if (pengembanganSudahDibayar > biayaPengembangan) {
-          await koneksiTransaksi.rollback();
-          return res.status(400).json({
-            error: { kode: "VALIDASI_GAGAL", pesan: "Saldo awal pengembangan tidak boleh melebihi total nilai tagihannya." }
-          });
-        }
         await koneksiTransaksi.query(
-          `INSERT INTO pembayaran (siswa_id, jenis, tanggal, nominal, catatan, sumber) 
-           VALUES (?, 'pengembangan', ?, ?, 'Pemutihan saldo awal siswa lama', 'saldo_awal')`,
+          `INSERT INTO pembayaran (siswa_id, jenis, tanggal, nominal, catatan, sumber) VALUES (?, 'pengembangan', ?, ?, 'Saldo awal', 'saldo_awal')`,
           [idSiswaBaru, hariIni, pengembanganSudahDibayar]
         );
       }
-
-      // Jika ada cicilan bulanan terdahulu
       if (bulananSudahDibayar > 0) {
         await koneksiTransaksi.query(
-          `INSERT INTO pembayaran (siswa_id, jenis, tanggal, nominal, catatan, sumber) 
-           VALUES (?, 'bulanan', ?, ?, 'Pemutihan saldo awal siswa lama', 'saldo_awal')`,
+          `INSERT INTO pembayaran (siswa_id, jenis, tanggal, nominal, catatan, sumber) VALUES (?, 'bulanan', ?, ?, 'Saldo awal', 'saldo_awal')`,
           [idSiswaBaru, hariIni, bulananSudahDibayar]
+        );
+      }
+      if (tahunanSudahDibayar > 0) {
+        await koneksiTransaksi.query(
+          `INSERT INTO pembayaran (siswa_id, jenis, tanggal, nominal, catatan, sumber) VALUES (?, 'tahunan', ?, ?, 'Saldo awal', 'saldo_awal')`,
+          [idSiswaBaru, hariIni, tahunanSudahDibayar]
         );
       }
     }
 
-    // Komit data ke database jika seluruh rangkaian proses di atas sukses tanpa eror
+    // Komit transaksi data jika semua sukses tanpa kendala
     await koneksiTransaksi.commit();
 
-    // Mengembalikan respons sukses sesuai spesifikasi blueprint JSON
     res.status(201).json({
       siswa: {
         id: idSiswaBaru,
@@ -117,15 +117,13 @@ router.post('/', kunciBendahara, async (req, res) => {
         bulan_mulai_tagih: tanggalMulai
       },
       peringatan: adaPeringatan ? "Siswa dengan nama dan kelas yang sama sudah terdaftar." : null,
-      pesan: "Data siswa beserta tagihan perdana berhasil diterbitkan."
+      pesan: "Data siswa beserta 3 bon tagihan awal sukses dikunci ke sistem."
     });
 
   } catch (error) {
-    // Batalkan seluruh rangkaian jika ada kegagalan query di tengah jalan
     await koneksiTransaksi.rollback();
     res.status(500).json({ error: { kode: "SERVER_ERROR", pesan: error.message } });
   } finally {
-    // Lepaskan koneksi pool kembali ke server MySQL
     koneksiTransaksi.release();
   }
 });

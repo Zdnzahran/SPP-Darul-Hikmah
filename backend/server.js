@@ -55,6 +55,13 @@ app.use('/api/spp', sppRouter);
 
 const siswaRouter = require('./siswa');
 app.use('/api/siswa', siswaRouter);
+
+const { tagihanRouter } = require('./tagihan');
+app.use('/api/tagihan', tagihanRouter);
+
+const pembayaranRouter = require('./pembayaran');
+app.use('/api/pembayaran', pembayaranRouter);
+
 // Endpoint Cek Kesehatan Server
 app.get('/api/health', async (req, res) => {
   try {
